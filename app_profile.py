@@ -1,4 +1,5 @@
-# app_profile.py（例）
+# app_profile.py
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from supabase_client import supabase  # あなたの既存クライアント
@@ -7,22 +8,22 @@ router = APIRouter(prefix="/me", tags=["me"])
 
 class ProfileOut(BaseModel):
     display_name: str
-    avatar_url: str | None = None
+    avatar_url: Optional[str] = None
     solo_count: int
     team_count: int
     badge_count: int
 
 class ProfileUpdate(BaseModel):
-    display_name: str | None = None
-    avatar_url: str | None = None
+    display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 def get_user_id_from_bearer(authorization: str = Header(...)) -> str:
     # "Bearer <token>" を想定。検証を簡略化（本番はJWT検証やSupabaseのauthヘルパーを使う）
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
-    access_token = authorization.removeprefix("Bearer ").strip()
+    access_token = authorization.removeprefix("Bearer ").strip()  # Python 3.9+ でOK
 
-    # Supabaseのget_user()などでtoken→user情報取得（Python SDK v2系はauth.get_user()）
+    # Supabaseのget_user()でtoken→user情報取得
     user = supabase.auth.get_user(access_token)
     if not user or not user.user:
         raise HTTPException(status_code=401, detail="Invalid token")
