@@ -2,30 +2,32 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase_client import supabase  # あなたの既存のクライアント
+from supabase_client import supabase
+from app_profile import router as me_router
 
 app = FastAPI()
 
-# --- CORS ---
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # 本番はフロントのドメインに
-    allow_credentials=True,                   # Cookieを使わないなら False でもOK
-    allow_methods=["*"],                      # 必要最低限なら ["POST","GET","OPTIONS"]
-    allow_headers=["*"],                      # 必要最低限なら ["Content-Type","Authorization"]
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# （保険）任意パスのOPTIONSに200を返す
+# 任意パスのOPTIONSに200
 @app.options("/{rest_of_path:path}")
 def preflight_handler(rest_of_path: str):
     return {}
 
-# --- ヘルスチェック ---
+# ここを追加！
+app.include_router(me_router)
+
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
 
-# --- スキーマ ---
 class UserSignUpRequest(BaseModel):
     email: str
     password: str
@@ -34,7 +36,6 @@ class UserSignInRequest(BaseModel):
     email: str
     password: str
 
-# --- エンドポイント ---
 @app.post("/auth/signup")
 def signup(user_request: UserSignUpRequest):
     try:
@@ -42,7 +43,7 @@ def signup(user_request: UserSignUpRequest):
             "email": user_request.email,
             "password": user_request.password,
         })
-        if resp.user:
+        if getattr(resp, "user", None):
             return {"message": "User signed up successfully. Check your email for confirmation."}
         raise HTTPException(status_code=500, detail="Internal server error.")
     except Exception as e:
@@ -55,11 +56,11 @@ def signin(user_request: UserSignInRequest):
             "email": user_request.email,
             "password": user_request.password,
         })
-        if resp.session:
+        if getattr(resp, "session", None):
             return {
                 "message": "User signed in successfully.",
                 "access_token": resp.session.access_token,
-                "user": resp.user.dict(),
+                "user": resp.user.dict() if getattr(resp, "user", None) else None,
             }
         raise HTTPException(status_code=500, detail="Internal server error.")
     except Exception as e:
