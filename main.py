@@ -5,6 +5,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase_client import supabase
 from app_profile import router as me_router
+from app_rooms import router as rooms_router
 import random
 import string
 
@@ -30,6 +31,9 @@ def preflight_handler(rest_of_path: str):
 # ===== Include sub-routers =====
 # ※ /me/profile を提供
 app.include_router(me_router)
+
+# ※ /rooms を提供
+app.include_router(rooms_router)
 
 # ===== Health =====
 @app.get("/")
