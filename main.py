@@ -96,6 +96,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import uuid
 import random
 import string
+from fastapi import FastAPI, HTTPException, Depends
 
 # 認証用の依存性注入ヘルパー関数
 # HTTPヘッダーからaccess_tokenを取得し、有効性を検証します
@@ -120,26 +121,26 @@ def generate_password():
 
 # 部屋作成のエンドポイント
 @app.post("/rooms")
+# main.py
 def create_room(current_user: dict = Depends(get_current_user)):
     try:
-        # ルームIDとパスワードを生成
-        room_id = str(uuid.uuid4())[:8].replace('-', '')
+        # パスワードを生成
         password = generate_password()
 
         # Supabaseに新しいルーム情報を挿入
         response = supabase.table("rooms").insert({
-            "id": room_id,
-            "host_id": current_user['id'],
+            "host_id": current_user.id,
             "password": password
         }).execute()
 
-        # 成功レスポンスを返す
+        # データベースから自動生成されたIDを取得
+        created_room = response.data[0] if response.data else None
+        
         return {
             "message": "Room created successfully.",
-            "room_id": room_id,
+            "room_id": created_room['id'] if created_room else "Failed to get room ID",
             "password": password
         }
 
     except Exception as e:
-        # データベース操作に失敗した場合のエラーハンドリング
         raise HTTPException(status_code=500, detail=f"Database operation failed: {e}")
