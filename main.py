@@ -1,17 +1,19 @@
 # main.py
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase_client import supabase
 from app_profile import router as me_router
-
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import random
 import string
 
-app = FastAPI()
+app = FastAPI(
+    title="CrystaRise API",
+    version="1.0.0"
+)
 
-# CORS（フロントのAuthorizationヘッダを通せるようにしている）
+# ===== CORS =====
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -20,21 +22,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 任意パスのOPTIONSに200（Preflight対策）
+# ===== Preflight for any path =====
 @app.options("/{rest_of_path:path}")
 def preflight_handler(rest_of_path: str):
     return {}
 
-# ← /me/profile を提供するルーターを**必ず**含める
+# ===== Include sub-routers =====
+# ※ /me/profile を提供
 app.include_router(me_router)
 
+# ===== Health =====
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
 
-# ========================
-# Auth DTO
-# ========================
+# ===== Auth DTO =====
 class UserSignUpRequest(BaseModel):
     email: str
     password: str
@@ -43,9 +45,7 @@ class UserSignInRequest(BaseModel):
     email: str
     password: str
 
-# ========================
-# Auth endpoints
-# ========================
+# ===== Auth endpoints =====
 @app.post("/auth/signup", tags=["auth"])
 def signup(user_request: UserSignUpRequest):
     try:
@@ -67,35 +67,42 @@ def signin(user_request: UserSignInRequest):
             "password": user_request.password,
         })
         if getattr(resp, "session", None):
+            user_obj = getattr(resp, "user", None)
+            user_payload = None
+            if user_obj:
+                # supabase-py v2 の user は属性アクセス可能
+                user_payload = {
+                    "id": getattr(user_obj, "id", None),
+                    "email": getattr(user_obj, "email", None),
+                    "user_metadata": getattr(user_obj, "user_metadata", None),
+                }
             return {
                 "message": "User signed in successfully.",
                 "access_token": resp.session.access_token,
-                "user": resp.user.dict() if getattr(resp, "user", None) else None,
+                "user": user_payload,
             }
         raise HTTPException(status_code=500, detail="Internal server error.")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ========================
-# Security / current user
-# ========================
+# ===== Security: current user from Bearer =====
 bearer_scheme = HTTPBearer(auto_error=True)
 
 def get_current_user(creds: HTTPAuthorizationCredentials = Security(bearer_scheme)):
     """
-    SwaggerのAuthorize（鍵アイコン）でBearerトークンを登録すると、
-    ここに自動で渡されるようになります。
+    Swagger の Authorize（鍵アイコン）に Bearer <token> を入れると、
+    ここに自動で渡ってきます。
     """
     try:
         user_info = supabase.auth.get_user(creds.credentials)
-        return user_info.user
+        user = getattr(user_info, "user", None)
+        if not user or not getattr(user, "id", None):
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        return user
     except Exception:
-        # 認証失敗は401（Not authenticatedは403だが、Bearer未設定時はSwaggerが403を返すこともある）
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-# ========================
-# Rooms
-# ========================
+# ===== Rooms =====
 def generate_password(length: int = 6):
     chars = string.ascii_uppercase + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
@@ -111,7 +118,7 @@ def create_room(current_user = Depends(get_current_user)):
         created_room = response.data[0] if response.data else None
         return {
             "message": "Room created successfully.",
-            "room_id": created_room['id'] if created_room else None,
+            "room_id": created_room["id"] if created_room else None,
             "password": password
         }
     except Exception as e:
