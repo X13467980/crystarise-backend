@@ -50,7 +50,7 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
         rpc_client.auth(access_token)
 
         resp = rpc_client.rpc(
-            "create_solo_room_with_crystal_v2",
+            "create_solo_room_with_crystal",
             {
                 "p_title": payload.title,
                 "p_target": str(payload.target_value),  # numeric は文字列で安全
@@ -64,9 +64,17 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
             raise HTTPException(status_code=500, detail="RPC returned no data")
 
         row = data[0]
+        # v1: room_id / crystal_id, v2: room_id_out / crystal_id_out に両対応
+        room_id = row.get("room_id_out") or row.get("room_id")
+        crystal_id = row.get("crystal_id_out") or row.get("crystal_id")
+
+        if room_id is None or crystal_id is None:
+            # デバッグ用に生データを見たいときはログを仕込むと良い
+            raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
+
         return {
-            "room_id": row["room_id"],
-            "crystal_id": row["crystal_id"],
+            "room_id": room_id,
+            "crystal_id": crystal_id,
             "title": payload.title,
             "target_value": str(payload.target_value),
             "unit": payload.unit,
