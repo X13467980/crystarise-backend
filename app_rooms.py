@@ -1,4 +1,6 @@
 # app_rooms.py
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, condecimal
 from supabase_client import supabase  # anonキーのクライアントを想定
@@ -9,7 +11,7 @@ class CreateSoloPayload(BaseModel):
     title: str
     target_value: condecimal(max_digits=12, decimal_places=4)
     unit: str
-    password: str | None = None
+    password: Optional[str] = None
 
 def require_auth(authorization: str = Header(...)):
     # "Bearer <token>" を想定
@@ -21,9 +23,7 @@ def require_auth(authorization: str = Header(...)):
 def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(require_auth)):
     try:
         # RPCは "Authorization: Bearer <token>" を付けて呼ぶ必要がある
-        # supabase-pyは個別リクエストヘッダを指定しづらいので、postgrestへ直接叩くか、
-        # もしくは supabase.postgrest.auth(access_token) を使う（最新版で利用可）。
-        # ここでは postgrest の auth ヘルパを使う例:
+        # supabase.postgrest.auth(access_token) を使う（対応版想定）
         rpc_client = supabase.postgrest
         rpc_client.auth(access_token)
 
@@ -37,10 +37,11 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(req
             },
         ).execute()
 
-        if not resp.data or len(resp.data) == 0:
+        data = (resp.data or [])
+        if not data:
             raise HTTPException(status_code=500, detail="RPC returned no data")
 
-        row = resp.data[0]
+        row = data[0]
         return {
             "room_id": row["room_id"],
             "crystal_id": row["crystal_id"],
@@ -48,5 +49,7 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(req
             "target_value": str(payload.target_value),
             "unit": payload.unit,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create solo room: {e}")
