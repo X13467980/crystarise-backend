@@ -123,3 +123,39 @@ def create_room(current_user = Depends(get_current_user)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database operation failed: {e}")
+    # main.py
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+
+# ... (既存のコードは省略) ...
+
+# 部屋参加用のリクエストボディの型を定義
+class JoinRoomRequest(BaseModel):
+    room_id: str
+    password: str
+
+# 部屋参加のエンドポイント
+@app.post("/rooms/join", tags=["rooms"])
+def join_room(request: JoinRoomRequest, current_user: dict = Depends(get_current_user)):
+    try:
+        # 1. 部屋の存在とパスワードを検証
+        response = supabase.table("rooms").select("*").eq("id", request.room_id).single().execute()
+        
+        # 部屋が見つからなかった場合
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Room not found.")
+
+        # パスワードが一致しない場合
+        room = response.data
+        if room['password'] != request.password:
+            raise HTTPException(status_code=401, detail="Invalid password.")
+
+        # パスワードが一致したら成功
+        return {"message": "Successfully joined the room."}
+
+    except Exception as e:
+        # Supabaseからのエラーメッセージを捕捉
+        if "rows not found" in str(e):
+            raise HTTPException(status_code=404, detail="Room not found.")
+        
+        raise HTTPException(status_code=500, detail=str(e))
