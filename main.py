@@ -129,6 +129,7 @@ def create_room(current_user: dict = Depends(get_current_user)):
 
         # Supabaseに新しいルーム情報を挿入
         response = supabase.table("rooms").insert({
+            # idはデータベースが自動生成するので含めない
             "host_id": current_user.id,
             "password": password
         }).execute()
