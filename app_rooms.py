@@ -50,7 +50,7 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
         rpc_client.auth(access_token)
 
         resp = rpc_client.rpc(
-            "create_solo_room_with_crystal",
+            "create_solo_room_with_crystal_v2",
             {
                 "p_title": payload.title,
                 "p_target": str(payload.target_value),  # numeric は文字列で安全
