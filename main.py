@@ -7,6 +7,7 @@ from supabase_client import supabase
 from app_profile import router as me_router
 import random
 import string
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_401_UNAUTHORIZED, HTTP_409_CONFLICT, HTTP_500_INTERNAL_SERVER_ERROR, HTTP_400_BAD_REQUEST
 
 app = FastAPI(
     title="CrystaRise API",
@@ -36,13 +37,17 @@ app.include_router(me_router)
 def read_root():
     return {"message": "Hello, World!"}
 
-# ===== Auth DTO =====
+# ===== Auth DTO & Room Join DTO =====
 class UserSignUpRequest(BaseModel):
     email: str
     password: str
 
 class UserSignInRequest(BaseModel):
     email: str
+    password: str
+
+class JoinRoomRequest(BaseModel):
+    room_id: str
     password: str
 
 # ===== Auth endpoints =====
@@ -55,9 +60,9 @@ def signup(user_request: UserSignUpRequest):
         })
         if getattr(resp, "user", None):
             return {"message": "User signed up successfully. Check your email for confirmation."}
-        raise HTTPException(status_code=500, detail="Internal server error.")
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
 
 @app.post("/auth/signin", tags=["auth"])
 def signin(user_request: UserSignInRequest):
@@ -81,9 +86,9 @@ def signin(user_request: UserSignInRequest):
                 "access_token": resp.session.access_token,
                 "user": user_payload,
             }
-        raise HTTPException(status_code=500, detail="Internal server error.")
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
 
 # ===== Security: current user from Bearer =====
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -97,10 +102,10 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Security(bearer_schem
         user_info = supabase.auth.get_user(creds.credentials)
         user = getattr(user_info, "user", None)
         if not user or not getattr(user, "id", None):
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+            raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="Invalid authentication credentials")
         return user
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="Invalid authentication credentials")
 
 # ===== Rooms =====
 def generate_password(length: int = 6):
@@ -122,40 +127,51 @@ def create_room(current_user = Depends(get_current_user)):
             "password": password
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database operation failed: {e}")
-    # main.py
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database operation failed: {e}")
 
-# ... (既存のコードは省略) ...
-
-# 部屋参加用のリクエストボディの型を定義
-class JoinRoomRequest(BaseModel):
-    room_id: str
-    password: str
-
-# 部屋参加のエンドポイント
 @app.post("/rooms/join", tags=["rooms"])
 def join_room(request: JoinRoomRequest, current_user: dict = Depends(get_current_user)):
     try:
         # 1. 部屋の存在とパスワードを検証
-        response = supabase.table("rooms").select("*").eq("id", request.room_id).single().execute()
+        room_data = supabase.table("rooms").select("*").eq("id", request.room_id).single().execute()
         
         # 部屋が見つからなかった場合
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Room not found.")
+        if not room_data.data:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Room not found.")
 
         # パスワードが一致しない場合
-        room = response.data
+        room = room_data.data
         if room['password'] != request.password:
-            raise HTTPException(status_code=401, detail="Invalid password.")
+            raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="Invalid password.")
 
-        # パスワードが一致したら成功
+        # 2. ユーザーがすでにメンバーかどうかを確認 (新しいロジック)
+        existing_member_response = supabase.table("room_members").select("*") \
+            .eq("room_id", request.room_id) \
+            .eq("user_id", current_user.id) \
+            .limit(1).execute() # limit(1) を追加
+
+        if existing_member_response.data and len(existing_member_response.data) > 0:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="User is already a member of this room.")
+
+        # 3. room_membersテーブルにメンバー情報を挿入 (新しいロジック)
+        insert_data = {
+            "room_id": request.room_id,
+            "user_id": current_user.id
+        }
+        supabase.table("room_members").insert(insert_data).execute()
+
+        # パスワードが一致し、メンバーとして追加されたら成功
         return {"message": "Successfully joined the room."}
 
     except Exception as e:
         # Supabaseからのエラーメッセージを捕捉
-        if "rows not found" in str(e):
-            raise HTTPException(status_code=404, detail="Room not found.")
+        # single().execute() でデータが見つからなかった場合のエラー処理を改善
+        if "rows not found" in str(e) or "The resource was not found" in str(e):
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Room not found.")
         
-        raise HTTPException(status_code=500, detail=str(e))
+        # RLSポリシー違反のエラーも捕捉し、より具体的なメッセージを返す
+        if "violates row-level security policy" in str(e):
+             raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="Authorization failed due to RLS policy. Please ensure RLS is correctly configured or disabled for testing.")
+
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database operation failed: {e}")
+
