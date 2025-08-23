@@ -1,9 +1,10 @@
 # app_rooms.py
-from typing import Optional
+from typing import Optional, List
+from decimal import Decimal # condecimalの代わりにDecimalをインポート
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, condecimal
+from pydantic import BaseModel
 from supabase_client import supabase
 import random, string
 
@@ -13,13 +14,20 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 class CreateSoloPayload(BaseModel):
     name: str
     title: str
-    target_value: condecimal(max_digits=12, decimal_places=4)
+    target_value: Decimal # condecimalの代わりにDecimalを使用
     unit: str
     password: Optional[str] = None  # Python 3.9 互換
 
 class JoinRoomRequest(BaseModel):
     room_id: int
     password: str
+
+# 部屋メンバーの表示用データモデル
+class RoomMemberDisplayInfo(BaseModel):
+    user_id: str
+    display_name: str
+    role: str # 追加
+    joined_at: str # 追加
 
 # ====== Auth helpers ======
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -49,7 +57,6 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
         rpc_client = supabase.postgrest
         rpc_client.auth(access_token)
 
-        # まずはRPCを呼ぶ（RPCが p_name を受け取れる場合）
         resp = rpc_client.rpc(
             "create_solo_room_with_crystal",
             {
@@ -57,8 +64,7 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
                 "p_target": str(payload.target_value),
                 "p_unit": payload.unit,
                 "p_password": payload.password,
-                # RPCが未対応なら後段のUPDATEでフォローするのでコメントアウトでもOK
-                "p_name": payload.name,   # ← RPC対応済みなら渡す
+                "p_name": payload.name,
             },
         ).execute()
 
@@ -72,11 +78,9 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
         if room_id is None or crystal_id is None:
             raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
 
-        # 万一、RPCが name を保存していない場合に備えてフォロー
         try:
             rpc_client.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
         except Exception:
-            # ここで失敗しても致命ではないのでログだけにするのが実運用向き
             pass
 
         return {
@@ -100,7 +104,7 @@ def create_room(current_user = Depends(get_current_user)):
         res_room = supabase.table("rooms").insert({
             "host_id": current_user.id,
             "password": password,
-            "mode": "solo",  # 必要に応じて変更（teamにしたい場合など）
+            "mode": "solo",
         }).execute()
 
         created = (res_room.data or [None])[0]
@@ -109,7 +113,6 @@ def create_room(current_user = Depends(get_current_user)):
 
         room_id = created["id"]
 
-        # 作成者を host でメンバー登録（重複時は無視）
         supabase.table("room_members").upsert({
             "room_id": room_id,
             "user_id": current_user.id,
@@ -130,7 +133,6 @@ def create_room(current_user = Depends(get_current_user)):
 @router.post("/join")
 def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
     try:
-        # 部屋の存在 & パスワード確認
         room_res = supabase.table("rooms").select("*").eq("id", req.room_id).single().execute()
         room = room_res.data
         if not room:
@@ -139,7 +141,6 @@ def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
         if room["password"] != req.password:
             raise HTTPException(status_code=401, detail="Invalid password.")
 
-        # 正しい場合はメンバー登録（重複時は無視）
         supabase.table("room_members").upsert({
             "room_id": req.room_id,
             "user_id": current_user.id,
@@ -150,7 +151,51 @@ def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
     except HTTPException:
         raise
     except Exception as e:
-        # PostgREST の "row not found" 表現にも配慮
         if "rows not found" in str(e):
             raise HTTPException(status_code=404, detail="Room not found.")
         raise HTTPException(status_code=500, detail=str(e))
+        
+# ====== 4) 特定の部屋情報を取得 ======
+@router.get("/{room_id}", response_model=dict)
+def get_room_details(room_id: int, current_user = Depends(get_current_user)):
+    try:
+        response = supabase.table("rooms").select("*").eq("id", room_id).single().execute()
+
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Room not found.")
+
+        is_member_res = supabase.table("room_members").select("user_id").eq("room_id", room_id).eq("user_id", current_user.id).execute()
+        if not is_member_res.data:
+            raise HTTPException(status_code=403, detail="Forbidden: You are not a member of this room.")
+        
+        room_details = response.data
+        return room_details
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ====== 5) 部屋メンバーのリストを取得 ======
+@router.get("/{room_id}/members", response_model=List[RoomMemberDisplayInfo])
+def get_room_members(room_id: int, current_user = Depends(get_current_user)):
+    try:
+        response = supabase.table("room_members").select(
+            "user_id, joined_at, role, users(display_name)"
+        ).eq("room_id", room_id).execute()
+
+        members_list = []
+        for member_data in response.data:
+            user_info = member_data.pop('users')
+            if user_info:
+                members_list.append(RoomMemberDisplayInfo(
+                    user_id=member_data['user_id'],
+                    display_name=user_info['display_name'],
+                    role=member_data['role'],
+                    joined_at=member_data['joined_at']
+                ))
+        
+        return members_list
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch room members: {e}")
