@@ -62,6 +62,15 @@ def _fetch_crystal(crystal_id: int, token: str):
         # raise HTTPException(status_code=404, detail="crystal not found")
     return res.data
 
+def _fetch_crystal_by_room_id(room_id: int, token: str):
+    """room_idで結晶を取得（RLSにより見えなければ404相当）"""
+    db = supabase_as(token) 
+    print(room_id, token)
+    res = db.table("crystals").select("*").eq("room_id", room_id).single().execute()
+    # if res.error:
+        # raise HTTPException(status_code=404, detail="crystal not found")
+    return res.data
+
 def _sum_records(crystal_id: int, token: str) -> Decimal:
     """記録の合計値を計算（必要に応じてRPC化を検討）"""
     db = supabase_as(token)
@@ -109,9 +118,9 @@ def get_crystal_by_room(
         raise HTTPException(status_code=404, detail="crystal not found")
     return crystal
 
-@router.post("/{crystal_id}/records", summary="進捗を追加（crystal_id 指定）")
+@router.post("/{room_id}/records", summary="進捗を追加（room_id 指定）")
 def add_record(
-    crystal_id: int,
+    room_id: int,
     payload: CrystalRecordCreate,
     creds: HTTPAuthorizationCredentials = Depends(auth_scheme),
     user=Depends(get_current_user),
@@ -120,16 +129,16 @@ def add_record(
     db = supabase_as(creds.credentials)
     try:
         # 存在/権限チェック
-        crestal = _fetch_crystal(crystal_id, creds.credentials)
-
+        crystal = _fetch_crystal_by_room_id(room_id, creds.credentials)
+        print(crystal)
 
         res = db.table("crystal_records").insert({
-            "crystal_id": crystal_id,
+            "crystal_id": crystal["crystal_id"],
             "user_id": user.id,                 # フロントから user_id を受け取らない！
             "value": str(payload.value),
             "note": payload.note or None,
         }).execute()
-        return int((res.data[0]["value"]/crestal["target_value"])*100)
+        return int((res.data[0]["value"]/crystal["target_value"])*100)
     except HTTPException:
             raise
     except Exception as e:
