@@ -5,7 +5,7 @@ from datetime import datetime # joined_at の型定義に使用
 
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from supabase_client import supabase
 import random, string # generate_password関数に使用
 
