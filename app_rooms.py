@@ -123,16 +123,19 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
 
 # ====== 2) 通常の部屋作成（rooms に1行+自分をhostでメンバー登録） ======
 @router.post("")
-def create_room(current_user = Depends(get_current_user)):
-    """
-    ソロモードの部屋を作成し、作成者をホストとしてメンバーに登録します。
-    """
+def create_room(
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     try:
+        pg = supabase.postgrest
+        pg.auth(access_token)
+
         password = generate_password()
-        res_room = supabase.table("rooms").insert({
+        res_room = pg.from_("rooms").insert({
             "host_id": current_user.id,
             "password": password,
-            "mode": "solo",  # ソロモードの指定
+            "mode": "solo",
         }).execute()
 
         created = (res_room.data or [None])[0]
@@ -141,18 +144,14 @@ def create_room(current_user = Depends(get_current_user)):
 
         room_id = created["id"]
 
-        # 作成者を host でメンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        # ← ここを rooms_members に
+        pg.from_("rooms_members").upsert({
             "room_id": room_id,
             "user_id": current_user.id,
             "role": "host",
         }, on_conflict="room_id,user_id").execute()
 
-        return {
-            "message": "Room created successfully.",
-            "room_id": room_id,
-            "password": password,
-        }
+        return {"message": "Room created successfully.", "room_id": room_id, "password": password}
     except HTTPException:
         raise
     except Exception as e:
@@ -198,7 +197,7 @@ def create_group_room(payload: CreateGroupPayload, access_token: str = Depends(g
             pass  # name列が無ければ無視
 
         # 2) hostとしてメンバー登録（重複無視）
-        pg.from_("room_members").upsert({
+        pg.from_("rooms_members").upsert({
             "room_id": room_id,
             "user_id": user.id,
             "role": "host",
@@ -229,31 +228,27 @@ def create_group_room(payload: CreateGroupPayload, access_token: str = Depends(g
 
 # ====== 3) 参加（パスワード検証 + メンバー登録） ======
 @router.post("/join")
-def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
-    """
-    ルームIDとパスワードを検証し、ユーザーを部屋のメンバーとして登録します。
-    """
+def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user), access_token: str = Depends(get_access_token)):
     try:
-        # 部屋の存在 & パスワード確認
-        room_res = supabase.table("rooms").select("id, password, mode").eq("id", req.room_id).single().execute() # modeも取得
+        pg = supabase.postgrest
+        pg.auth(access_token)
+
+        room_res = pg.from_("rooms").select("id,password,mode").eq("id", req.room_id).single().execute()
         room = room_res.data
         if not room:
             raise HTTPException(status_code=404, detail="Room not found.")
-
         if room["password"] != req.password:
             raise HTTPException(status_code=401, detail="Invalid password.")
 
-        # ひとり専用ルームのチェック（ソロモードの場合のみ）
         if room["mode"] == "solo":
-            existing_members_count_res = supabase.table("room_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
-            if existing_members_count_res.data and len(existing_members_count_res.data) > 0:
+            exists_res = pg.from_("rooms_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
+            if exists_res.data and len(exists_res.data) > 0:
                 raise HTTPException(status_code=409, detail="This is a solo room and is already occupied.")
 
-        # メンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        pg.from_("rooms_members").upsert({
             "room_id": req.room_id,
             "user_id": current_user.id,
-            "role": "member", # 参加者は"member"ロール
+            "role": "member",
         }, on_conflict="room_id,user_id").execute()
 
         return {"message": "Successfully joined the room."}
