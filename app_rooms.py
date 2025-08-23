@@ -7,6 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase_client import supabase
 import random, string
+from datetime import datetime
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -26,8 +27,9 @@ class JoinRoomRequest(BaseModel):
 class RoomMemberDisplayInfo(BaseModel):
     user_id: str
     display_name: str
-    role: str # 追加
-    joined_at: str # 追加
+    avatar_url: Optional[str] = None
+    role: str
+    joined_at: datetime
 
 # ====== Auth helpers ======
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -180,22 +182,40 @@ def get_room_details(room_id: int, current_user = Depends(get_current_user)):
 @router.get("/{room_id}/members", response_model=List[RoomMemberDisplayInfo])
 def get_room_members(room_id: int, current_user = Depends(get_current_user)):
     try:
-        response = supabase.table("room_members").select(
-            "user_id, joined_at, role, users(display_name)"
-        ).eq("room_id", room_id).execute()
+        # PostgRESTのリレーション選択。外部キーが貼れていれば users!inner(...) が使えます。
+        # FK 名で明示する場合は `users!room_members_user_id_fkey(...)` に置き換えてください。
+        response = (
+            supabase.table("room_members")
+            .select(
+                "user_id, joined_at, role, users!inner(display_name, avatar_url)"
+                # もしFK名が必要なら:
+                # "user_id, joined_at, role, users!room_members_user_id_fkey(display_name, avatar_url)"
+            )
+            .eq("room_id", room_id)
+            .order("joined_at", desc=False)
+            .execute()
+        )
 
-        members_list = []
-        for member_data in response.data:
-            user_info = member_data.pop('users')
+        members_list: List[RoomMemberDisplayInfo] = []
+        for row in response.data or []:
+            # PostgRESTは1対1なら dict、1対多なら list になることがあるので両対応
+            user_info = row.get("users")
+            if isinstance(user_info, list):
+                user_info = user_info[0] if user_info else None
+
             if user_info:
-                members_list.append(RoomMemberDisplayInfo(
-                    user_id=member_data['user_id'],
-                    display_name=user_info['display_name'],
-                    role=member_data['role'],
-                    joined_at=member_data['joined_at']
-                ))
-        
+                members_list.append(
+                    RoomMemberDisplayInfo(
+                        user_id=row["user_id"],
+                        display_name=user_info.get("display_name", ""),
+                        avatar_url=user_info.get("avatar_url"),
+                        role=row["role"],
+                        joined_at=row["joined_at"],
+                    )
+                )
+
         return members_list
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch room members: {e}")
+
