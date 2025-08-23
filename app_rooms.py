@@ -103,7 +103,7 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
 
         return {
             "room_id": room_id,
-            "crystal_id": crystal_id,
+            "crystal_id": _id,
             "name": payload.name,
             "title": payload.title,
             "target_value": str(payload.target_value),
