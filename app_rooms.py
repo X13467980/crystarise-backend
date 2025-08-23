@@ -19,16 +19,6 @@ class CreateSoloPayload(BaseModel):
     unit: str
     password: Optional[str] = None  # Python 3.9 互換
 
-class CreateGroupPayload(BaseModel):
-    name: str
-    title: str
-    target_value: Decimal
-    unit: str
-    password: Optional[str] = None  # 未入力なら自動生成
-
-def generate_password(length: int = 6) -> str:
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-
 class JoinRoomRequest(BaseModel):
     room_id: int
     password: str
@@ -163,89 +153,36 @@ def create_room(current_user = Depends(get_current_user)):
 
 # --- 新しく追加するグループルーム作成API ---
 @router.post("/group")
-def create_group_room(
-    payload: CreateGroupPayload,
-    access_token: str = Depends(get_access_token),
-    current_user = Depends(get_current_user),
-):
+def create_group_room(current_user = Depends(get_current_user)):
     """
-    グループモードの部屋＋クリスタルを作成し、作成者をホストとしてメンバーに登録。
+    グループモードの部屋を作成し、作成者をホストとしてメンバーに登録します。
     """
     try:
-        rpc_client = supabase.postgrest
-        rpc_client.auth(access_token)
+        password = generate_password()
+        res_room = supabase.table("rooms").insert({
+            "host_id": current_user.id,
+            "password": password,
+            "mode": "group",  # グループモードの指定
+        }).execute()
 
-        # RPCを先に試す
-        try:
-            resp = rpc_client.rpc(
-                "create_group_room_with_crystal",
-                {
-                    "p_title": payload.title,
-                    "p_target": str(payload.target_value),
-                    "p_unit": payload.unit,
-                    "p_password": payload.password or generate_password(),
-                    "p_name": payload.name,
-                    "p_mode": "group",
-                },
-            ).execute()
+        created = (res_room.data or [None])[0]
+        if not created:
+            raise HTTPException(status_code=500, detail="Group room insert failed")
 
-            data = resp.data or []
-            if not data:
-                raise HTTPException(status_code=500, detail="RPC returned no data")
+        room_id = created["id"]
 
-            row = data[0]
-            room_id = row.get("room_id_out") or row.get("room_id")
-            crystal_id = row.get("crystal_id_out") or row.get("crystal_id")
-            if room_id is None or crystal_id is None:
-                raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
-
-            # nameをroomsに反映（念のため）
-            try:
-                rpc_client.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
-            except Exception:
-                pass
-
-        except Exception as rpc_err:
-            # フォールバック: 通常のinsert
-            group_password = payload.password or generate_password()
-            res_room = supabase.table("rooms").insert({
-                "host_id": current_user.id,
-                "password": group_password,
-                "mode": "group",
-                "name": payload.name,
-            }).execute()
-            created_room = (res_room.data or [None])[0]
-            if not created_room:
-                raise HTTPException(status_code=500, detail=f"Group room insert failed (fallback): {rpc_err}")
-            room_id = created_room["id"]
-
-            res_crystal = supabase.table("crystals").insert({
-                "room_id": room_id,
-                "title": payload.title,
-                "target_value": str(payload.target_value),
-                "unit": payload.unit,
-            }).execute()
-            created_crystal = (res_crystal.data or [None])[0]
-            if not created_crystal:
-                raise HTTPException(status_code=500, detail="Crystal insert failed (fallback)")
-            crystal_id = created_crystal["id"]
-
-            supabase.table("room_members").upsert({
-                "room_id": room_id,
-                "user_id": current_user.id,
-                "role": "host",
-            }, on_conflict="room_id,user_id").execute()
+        # 作成者を host でメンバー登録（重複時は無視 - upsertを使用）
+        supabase.table("room_members").upsert({
+            "room_id": room_id,
+            "user_id": current_user.id,
+            "role": "host",
+        }, on_conflict="room_id,user_id").execute()
 
         return {
+            "message": "Group room created successfully.",
             "room_id": room_id,
-            "crystal_id": crystal_id,
-            "name": payload.name,
-            "title": payload.title,
-            "target_value": str(payload.target_value),
-            "unit": payload.unit,
-            "mode": "group",
+            "password": password,
         }
-
     except HTTPException:
         raise
     except Exception as e:
