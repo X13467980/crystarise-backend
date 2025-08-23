@@ -7,8 +7,8 @@ from supabase_client import supabase
 # Sub-routers
 from app_profile import router as me_router
 from app_rooms import router as rooms_router
+from app_crystal import router as crystals_router  # ← 追加
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
-
 
 app = FastAPI(
     title="CrystaRise API",
@@ -18,7 +18,7 @@ app = FastAPI(
 # ===== CORS =====
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # 必要に応じて調整
+    allow_origins=["http://localhost:3000"],  # 必要に応じてフロントのURLを追加
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +39,8 @@ def health():
 app.include_router(me_router)
 # /rooms/* エンドポイント（solo作成・参加などを集約）
 app.include_router(rooms_router)
+# /crystals/* エンドポイント（結晶の作成・記録・集計）
+app.include_router(crystals_router)  # ← 追加
 
 # ===== Auth DTO & Room Join DTO =====
 class UserSignUpRequest(BaseModel):
