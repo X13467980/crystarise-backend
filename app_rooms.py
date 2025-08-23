@@ -31,6 +31,13 @@ class RoomMemberDisplayInfo(BaseModel):
     role: str
     joined_at: datetime
 
+class CreateGroupPayload(BaseModel):
+    name: str
+    title: str
+    target_value: Decimal
+    unit: str
+    password: Optional[str] = None  # 指定なければサーバ側で自動生成
+
 # ====== Auth helpers ======
 bearer_scheme = HTTPBearer(auto_error=True)
 
@@ -153,40 +160,72 @@ def create_room(current_user = Depends(get_current_user)):
 
 # --- 新しく追加するグループルーム作成API ---
 @router.post("/group")
-def create_group_room(current_user = Depends(get_current_user)):
+def create_group_room(payload: CreateGroupPayload, access_token: str = Depends(get_access_token)):
     """
-    グループモードの部屋を作成し、作成者をホストとしてメンバーに登録します。
+    グループモードの部屋を作成し、作成者をホストとしてメンバー登録。
+    さらに、この部屋用の結晶（目標）を作成します。
     """
     try:
-        password = generate_password()
-        res_room = supabase.table("rooms").insert({
-            "host_id": current_user.id,
-            "password": password,
-            "mode": "group",  # グループモードの指定
-        }).execute()
+        # 現在ユーザー特定（RLS通過にも利用）
+        resp = supabase.auth.get_user(access_token)
+        user = getattr(resp, "user", None)
+        if not user or not getattr(user, "id", None):
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
+        # PostgRESTにアクセストークン付与（超重要）
+        pg = supabase.postgrest
+        pg.auth(access_token)
+
+        password = payload.password or generate_password()
+
+        # 1) rooms 作成（name列がある前提。無い場合は下のupdateを使う）
+        res_room = pg.from_("rooms").insert({
+            "host_id": user.id,
+            "password": password,
+            "mode": "group",
+            "name": payload.name,  # もしroomsにnameが無いなら次のtry節のupdateへ
+        }).execute()
         created = (res_room.data or [None])[0]
         if not created:
             raise HTTPException(status_code=500, detail="Group room insert failed")
-
         room_id = created["id"]
 
-        # 作成者を host でメンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        # rooms.nameが存在しないスキーマの場合のフォールバック
+        try:
+            if "name" not in created:
+                pg.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
+        except Exception:
+            pass  # name列が無ければ無視
+
+        # 2) hostとしてメンバー登録（重複無視）
+        pg.from_("room_members").upsert({
             "room_id": room_id,
-            "user_id": current_user.id,
+            "user_id": user.id,
             "role": "host",
         }, on_conflict="room_id,user_id").execute()
 
+        # 3) crystals 作成（目標保存）
+        pg.from_("crystals").insert({
+            "room_id": room_id,
+            "title": payload.title,
+            "target_value": str(payload.target_value),  # Decimal→strでnumeric(12,4)へ
+            "unit": payload.unit,
+        }).execute()
+
         return {
-            "message": "Group room created successfully.",
+            "message": "Group room & crystal created successfully.",
             "room_id": room_id,
             "password": password,
+            "crystal": {
+                "title": payload.title,
+                "target_value": str(payload.target_value),
+                "unit": payload.unit,
+            }
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create group room: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create group room with crystal: {e}")
 
 # ====== 3) 参加（パスワード検証 + メンバー登録） ======
 @router.post("/join")
