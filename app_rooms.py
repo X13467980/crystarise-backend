@@ -11,6 +11,7 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 
 # ====== Schemas ======
 class CreateSoloPayload(BaseModel):
+    name: str
     title: str
     target_value: condecimal(max_digits=12, decimal_places=4)
     unit: str
@@ -45,17 +46,19 @@ def generate_password(length: int = 6) -> str:
 @router.post("/solo")
 def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get_access_token)):
     try:
-        # RLS を効かせるため、呼び出し時にユーザーのトークンを付与
         rpc_client = supabase.postgrest
         rpc_client.auth(access_token)
 
+        # まずはRPCを呼ぶ（RPCが p_name を受け取れる場合）
         resp = rpc_client.rpc(
             "create_solo_room_with_crystal",
             {
                 "p_title": payload.title,
-                "p_target": str(payload.target_value),  # numeric は文字列で安全
+                "p_target": str(payload.target_value),
                 "p_unit": payload.unit,
                 "p_password": payload.password,
+                # RPCが未対応なら後段のUPDATEでフォローするのでコメントアウトでもOK
+                "p_name": payload.name,   # ← RPC対応済みなら渡す
             },
         ).execute()
 
@@ -64,17 +67,22 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
             raise HTTPException(status_code=500, detail="RPC returned no data")
 
         row = data[0]
-        # v1: room_id / crystal_id, v2: room_id_out / crystal_id_out に両対応
         room_id = row.get("room_id_out") or row.get("room_id")
         crystal_id = row.get("crystal_id_out") or row.get("crystal_id")
-
         if room_id is None or crystal_id is None:
-            # デバッグ用に生データを見たいときはログを仕込むと良い
             raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
+
+        # 万一、RPCが name を保存していない場合に備えてフォロー
+        try:
+            rpc_client.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
+        except Exception:
+            # ここで失敗しても致命ではないのでログだけにするのが実運用向き
+            pass
 
         return {
             "room_id": room_id,
             "crystal_id": crystal_id,
+            "name": payload.name,
             "title": payload.title,
             "target_value": str(payload.target_value),
             "unit": payload.unit,
