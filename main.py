@@ -8,6 +8,7 @@ from supabase_client import supabase
 from app_profile import router as me_router
 from app_rooms import router as rooms_router
 
+
 app = FastAPI(
     title="CrystaRise API",
     version="1.0.0",
@@ -38,13 +39,17 @@ app.include_router(me_router)
 # /rooms/* エンドポイント（solo作成・参加などを集約）
 app.include_router(rooms_router)
 
-# ===== Auth DTO =====
+# ===== Auth DTO & Room Join DTO =====
 class UserSignUpRequest(BaseModel):
     email: str
     password: str
 
 class UserSignInRequest(BaseModel):
     email: str
+    password: str
+
+class JoinRoomRequest(BaseModel):
+    room_id: str
     password: str
 
 # ===== Auth endpoints =====
@@ -57,9 +62,9 @@ def signup(user_request: UserSignUpRequest):
         })
         if getattr(resp, "user", None):
             return {"message": "User signed up successfully. Check your email for confirmation."}
-        raise HTTPException(status_code=500, detail="Internal server error.")
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
 
 @app.post("/auth/signin", tags=["auth"])
 def signin(user_request: UserSignInRequest):
@@ -82,6 +87,6 @@ def signin(user_request: UserSignInRequest):
                 "access_token": resp.session.access_token,
                 "user": user_payload,
             }
-        raise HTTPException(status_code=500, detail="Internal server error.")
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
