@@ -7,6 +7,7 @@ from supabase_client import supabase
 # Sub-routers
 from app_profile import router as me_router
 from app_rooms import router as rooms_router
+from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
 
 
 app = FastAPI(
