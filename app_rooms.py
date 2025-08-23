@@ -197,7 +197,7 @@ def create_group_room(payload: CreateGroupPayload, access_token: str = Depends(g
             pass  # name列が無ければ無視
 
         # 2) hostとしてメンバー登録（重複無視）
-        pg.from_("room_members").upsert({
+        pg.from_("rooms_members").upsert({
             "room_id": room_id,
             "user_id": user.id,
             "role": "host",
