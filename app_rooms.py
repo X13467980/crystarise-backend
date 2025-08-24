@@ -123,24 +123,43 @@ def create_room(
         pg.auth(access_token)
 
         password = generate_password()
-        res_room = pg.from_("rooms").insert({
-            "host_id": current_user.id,
-            "password": password,
-            "mode": "solo",
-        }).select("*").execute()
 
-        created = (res_room.data or [None])[0]
+        # ★ insert 後の .select("*") を撤去
+        res_room = pg.from_("rooms").insert(
+            {
+                "host_id": current_user.id,
+                "password": password,
+                "mode": "solo",
+            },
+            returning="representation",   # ← 可能なら挿入行を返す
+        ).execute()
+
+        data = res_room.data or []
+        created = data[0] if data else None
+
+        # フォールバック: 返ってこない環境向けに、直近の自分の部屋を拾う
+        if not created:
+            sel = pg.from_("rooms") \
+                .select("id,name,host_id,password,mode") \
+                .eq("host_id", current_user.id) \
+                .order("id", desc=True) \
+                .limit(1) \
+                .execute()
+            created = (sel.data or [None])[0]
+
         if not created:
             raise HTTPException(status_code=500, detail="Room insert failed")
 
         room_id = created["id"]
 
-        # rooms_members に upsert（重複時は無視）
-        pg.from_("rooms_members").upsert({
-            "room_id": room_id,
-            "user_id": current_user.id,
-            "role": "host",
-        }, on_conflict="room_id,user_id").execute()
+        pg.from_("rooms_members").upsert(
+            {
+                "room_id": room_id,
+                "user_id": current_user.id,
+                "role": "host",
+            },
+            on_conflict="room_id,user_id",
+        ).execute()
 
         return {"message": "Room created successfully.", "room_id": room_id, "password": password}
     except HTTPException:
@@ -149,6 +168,7 @@ def create_room(
         raise HTTPException(status_code=500, detail=f"Database operation failed: {e}")
 
 # --- 3) グループルーム作成 ---
+# --- 3) グループルーム作成 ---
 @router.post("/group")
 def create_group_room(
     payload: CreateGroupPayload,
@@ -156,7 +176,6 @@ def create_group_room(
 ):
     """グループモードの部屋を作成し、作成者をホストとしてメンバー登録。結晶も作成。"""
     try:
-        # 現在ユーザー
         resp = supabase.auth.get_user(access_token)
         user = getattr(resp, "user", None)
         if not user or not getattr(user, "id", None):
@@ -167,40 +186,61 @@ def create_group_room(
 
         password = payload.password or generate_password()
 
-        # rooms 作成
-        res_room = pg.from_("rooms").insert({
-            "host_id": user.id,
-            "password": password,
-            "mode": "group",
-            "name": payload.name,
-        }).select("*").execute()
+        # ★ insert 後の .select("*") を撤去
+        res_room = pg.from_("rooms").insert(
+            {
+                "host_id": user.id,
+                "password": password,
+                "mode": "group",
+                "name": payload.name,
+            },
+            returning="representation",   # ← 返ってくるならここで受け取る
+        ).execute()
 
-        created = (res_room.data or [None])[0]
+        data = res_room.data or []
+        created = data[0] if data else None
+
+        # フォールバック: 直近の自分のグループ部屋を拾う
+        if not created:
+            sel = pg.from_("rooms") \
+                .select("id,name,host_id,password,mode") \
+                .eq("host_id", user.id) \
+                .eq("mode", "group") \
+                .order("id", desc=True) \
+                .limit(1) \
+                .execute()
+            created = (sel.data or [None])[0]
+
         if not created:
             raise HTTPException(status_code=500, detail="Group room insert failed")
         room_id = created["id"]
 
-        # name フォールバック
+        # name フォールバック更新（不要なら無視される）
         try:
-            if "name" not in created:
+            if not created.get("name"):
                 pg.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
         except Exception:
             pass
 
         # host としてメンバー登録
-        pg.from_("rooms_members").upsert({
-            "room_id": room_id,
-            "user_id": user.id,
-            "role": "host",
-        }, on_conflict="room_id,user_id").execute()
+        pg.from_("rooms_members").upsert(
+            {
+                "room_id": room_id,
+                "user_id": user.id,
+                "role": "host",
+            },
+            on_conflict="room_id,user_id",
+        ).execute()
 
-        # crystals 作成
-        pg.from_("crystals").insert({
-            "room_id": room_id,
-            "title": payload.title,
-            "target_value": str(payload.target_value),
-            "unit": payload.unit,
-        }).execute()
+        # crystals 作成（insertのみ：ここでも .select はしない）
+        pg.from_("crystals").insert(
+            {
+                "room_id": room_id,
+                "title": payload.title,
+                "target_value": str(payload.target_value),
+                "unit": payload.unit,
+            }
+        ).execute()
 
         return {
             "message": "Group room & crystal created successfully.",
@@ -216,7 +256,7 @@ def create_group_room(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create group room with crystal: {e}")
-
+    
 # ====== 4) 参加（パスワード検証 + メンバー登録） ======
 @router.post("/join")
 def join_room(
