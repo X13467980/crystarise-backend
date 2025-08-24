@@ -28,7 +28,6 @@ venv/
 ENV/
 env/
 .venv/
-.env/
 
 # PyInstaller
 *.manifest
@@ -73,3 +72,6 @@ dmypy.json
 
 # Logs
 *.log
+
+env
+.env
