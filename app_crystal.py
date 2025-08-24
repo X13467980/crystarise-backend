@@ -41,9 +41,8 @@ class CrystalSummary(BaseModel):
     target_value: Decimal
     unit: str
     total_value: Decimal
-    progress_rate: float
+    progress_rate: float  # 0.0 ~ 1.0
 
-# 追加: room_name 付きの返却用DTO
 class CrystalWithRoom(BaseModel):
     crystal_id: int
     room_id: int
@@ -81,7 +80,6 @@ def _fetch_room_name(room_id: int, token: str) -> Optional[str]:
     """rooms.name を取得"""
     db = supabase_as(token)
     try:
-        # single() はバージョン差で例外になることがあるため limit(1) に統一
         res = db.table("rooms").select("name").eq("id", room_id).limit(1).execute()
         rows = res.data or []
         return rows[0]["name"] if rows else None
@@ -145,7 +143,6 @@ def get_crystal_by_room(
 
     room_name = _fetch_room_name(room_id, creds.credentials)
     if not room_name:
-        # roomsが見えない/存在しない場合
         raise HTTPException(status_code=404, detail="room not found or inaccessible")
 
     return CrystalWithRoom(
@@ -180,9 +177,12 @@ def add_record(
             .select("*")
             .execute()
         )
-        # 返却値は元の仕様を尊重（%計算を安全に）
-        row = (res.data or [None])[0]
-        value = Decimal(str(row["value"])) if row and "value" in row else Decimal(str(payload.value))
+        if not res.data:
+            raise HTTPException(status_code=400, detail="insert record failed")
+
+        # 単回の記録値に対する%を返す仕様（フロント要件踏襲）
+        row = res.data[0]
+        value = Decimal(str(row["value"]))
         target = Decimal(str(crystal["target_value"]))
         percent = int((value / target * 100)) if target > 0 else 0
         return percent
@@ -200,12 +200,14 @@ def add_record_by_room(
 ):
     db = supabase_as(creds.credentials)
 
+    # 1) room_id → crystal を取得（RLSでメンバー以外は不可視）
     crystal = _fetch_crystal_by_room(room_id, creds.credentials)
     if not crystal:
         raise HTTPException(status_code=404, detail="crystal not found for this room")
     crystal_id = crystal["crystal_id"]
 
     try:
+        # 2) 記録を追加（user_id は JWT から）
         res = (
             db.table("crystal_records")
             .insert({
@@ -220,6 +222,7 @@ def add_record_by_room(
         if not res.data:
             raise HTTPException(status_code=400, detail="insert record failed")
 
+        # 3) 直後のサマリーも返す（UI即時更新用）
         total = _sum_records(crystal_id, creds.credentials)
         target = Decimal(str(crystal["target_value"]))
         rate = float(total / target) if target > 0 else 0.0
@@ -291,6 +294,7 @@ def list_records(
     user=Depends(get_current_user),
 ):
     db = supabase_as(creds.credentials)
+    # 権限/存在チェック（RLSで見えなければ404相当）
     _ = _fetch_crystal(crystal_id, creds.credentials)
 
     try:

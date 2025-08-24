@@ -9,7 +9,7 @@ from supabase_client import supabase
 # Sub-routers
 from app_profile import router as me_router
 from app_rooms import router as rooms_router
-from app_crystal import router as crystal_router  # ★ crystals ルーターを追加
+from app_crystal import router as crystals_router  # 結晶系エンドポイント
 
 app = FastAPI(
     title="CrystaRise API",
@@ -19,7 +19,7 @@ app = FastAPI(
 # ===== CORS =====
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # 必要に応じて調整
+    allow_origins=["http://localhost:3000"],  # 必要に応じてフロントのURLを追加
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,9 +36,12 @@ def health():
     return {"ok": True, "message": "Hello, World!"}
 
 # ===== Include sub-routers =====
-app.include_router(me_router)        # /me/*
-app.include_router(rooms_router)     # /rooms/*
-app.include_router(crystal_router)   # /crystals/*  ★ 追加
+# /me/* エンドポイント
+app.include_router(me_router)
+# /rooms/* エンドポイント（solo作成・参加など）
+app.include_router(rooms_router)
+# /crystals/* エンドポイント（結晶の作成・記録・集計）
+app.include_router(crystals_router)
 
 # ===== Auth DTO =====
 class UserSignUpRequest(BaseModel):
@@ -47,10 +50,6 @@ class UserSignUpRequest(BaseModel):
 
 class UserSignInRequest(BaseModel):
     email: str
-    password: str
-
-class JoinRoomRequest(BaseModel):
-    room_id: str
     password: str
 
 # ===== Auth endpoints =====

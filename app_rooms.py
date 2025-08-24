@@ -5,9 +5,9 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from supabase_client import supabase  # 既存クライアントを利用（postgrest.auth でRLS通す）
-import random, string
+from pydantic import BaseModel, Field
+from supabase_client import supabase
+import random, string  # generate_password に使用
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -30,10 +30,16 @@ class RoomMemberDisplayInfo(BaseModel):
     role: str
     joined_at: datetime
 
-# 自分の所属ルーム一覧用
 class RoomBrief(BaseModel):
     id: int
     name: str
+
+class CreateGroupPayload(BaseModel):
+    name: str
+    title: str
+    target_value: Decimal
+    unit: str
+    password: Optional[str] = None  # 指定なければサーバ側で自動生成
 
 # ====== Auth helpers ======
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -63,14 +69,14 @@ def create_solo_room(
     access_token: str = Depends(get_access_token),
 ):
     try:
-        rpc_client = supabase.postgrest
-        rpc_client.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
-        resp = rpc_client.rpc(
+        resp = pg.rpc(
             "create_solo_room_with_crystal",
             {
                 "p_title": payload.title,
-                "p_target": str(payload.target_value),
+                "p_target": str(payload.target_value),  # numeric は文字列で
                 "p_unit": payload.unit,
                 "p_password": payload.password,
                 "p_name": payload.name,
@@ -87,8 +93,9 @@ def create_solo_room(
         if room_id is None or crystal_id is None:
             raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
 
+        # rooms.name 列が存在しなかった場合でも安全にフォールバック
         try:
-            rpc_client.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
+            pg.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
         except Exception:
             pass
 
@@ -112,14 +119,15 @@ def create_room(
     access_token: str = Depends(get_access_token),
 ):
     try:
-        supabase.postgrest.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
         password = generate_password()
-        res_room = supabase.table("rooms").insert({
+        res_room = pg.from_("rooms").insert({
             "host_id": current_user.id,
             "password": password,
             "mode": "solo",
-        }).select("*").execute()
+        }).execute()
 
         created = (res_room.data or [None])[0]
         if not created:
@@ -127,18 +135,14 @@ def create_room(
 
         room_id = created["id"]
 
-        # rooms_members に upsert
-        supabase.table("rooms_members").upsert({
+        # rooms_members に upsert（重複時は無視）
+        pg.from_("rooms_members").upsert({
             "room_id": room_id,
             "user_id": current_user.id,
             "role": "host",
         }, on_conflict="room_id,user_id").execute()
 
-        return {
-            "message": "Room created successfully.",
-            "room_id": room_id,
-            "password": password,
-        }
+        return {"message": "Room created successfully.", "room_id": room_id, "password": password}
     except HTTPException:
         raise
     except Exception as e:
@@ -147,40 +151,75 @@ def create_room(
 # --- 3) グループルーム作成 ---
 @router.post("/group")
 def create_group_room(
-    current_user = Depends(get_current_user),
+    payload: CreateGroupPayload,
     access_token: str = Depends(get_access_token),
 ):
+    """
+    グループモードの部屋を作成し、作成者をホストとしてメンバー登録。
+    さらに、この部屋用の結晶（目標）を作成します。
+    """
     try:
-        supabase.postgrest.auth(access_token)
+        # 現在ユーザー特定（RLS通過にも利用）
+        resp = supabase.auth.get_user(access_token)
+        user = getattr(resp, "user", None)
+        if not user or not getattr(user, "id", None):
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-        password = generate_password()
-        res_room = supabase.table("rooms").insert({
-            "host_id": current_user.id,
+        # PostgREST にアクセストークン付与（重要）
+        pg = supabase.postgrest
+        pg.auth(access_token)
+
+        password = payload.password or generate_password()
+
+        # 1) rooms 作成（name列が無いスキーマでも後でupdate試行）
+        res_room = pg.from_("rooms").insert({
+            "host_id": user.id,
             "password": password,
             "mode": "group",
-        }).select("*").execute()
+            "name": payload.name,
+        }).execute()
 
         created = (res_room.data or [None])[0]
         if not created:
             raise HTTPException(status_code=500, detail="Group room insert failed")
-
         room_id = created["id"]
 
-        supabase.table("rooms_members").upsert({
+        # rooms.name が無い環境向けフォールバック
+        try:
+            if "name" not in created:
+                pg.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
+        except Exception:
+            pass
+
+        # 2) host としてメンバー登録（重複無視）
+        pg.from_("rooms_members").upsert({
             "room_id": room_id,
-            "user_id": current_user.id,
+            "user_id": user.id,
             "role": "host",
         }, on_conflict="room_id,user_id").execute()
 
+        # 3) crystals 作成（目標保存）
+        pg.from_("crystals").insert({
+            "room_id": room_id,
+            "title": payload.title,
+            "target_value": str(payload.target_value),  # Decimal→strでnumeric(12,4)へ
+            "unit": payload.unit,
+        }).execute()
+
         return {
-            "message": "Group room created successfully.",
+            "message": "Group room & crystal created successfully.",
             "room_id": room_id,
             "password": password,
+            "crystal": {
+                "title": payload.title,
+                "target_value": str(payload.target_value),
+                "unit": payload.unit,
+            }
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create group room: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create group room with crystal: {e}")
 
 # ====== 4) 参加（パスワード検証 + メンバー登録） ======
 @router.post("/join")
@@ -190,24 +229,25 @@ def join_room(
     access_token: str = Depends(get_access_token),
 ):
     try:
-        supabase.postgrest.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
-        room_res = supabase.table("rooms").select("id, password, mode").eq("id", req.room_id).limit(1).execute()
+        # .single() はバージョン差で例外になることがあるため limit(1) に統一
+        room_res = pg.from_("rooms").select("id,password,mode").eq("id", req.room_id).limit(1).execute()
         room_rows = room_res.data or []
         room = room_rows[0] if room_rows else None
         if not room:
             raise HTTPException(status_code=404, detail="Room not found.")
-
         if room["password"] != req.password:
             raise HTTPException(status_code=401, detail="Invalid password.")
 
         # ソロルームは1人のみ
         if room["mode"] == "solo":
-            existing = supabase.table("rooms_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
-            if existing.data and len(existing.data) > 0:
+            exists_res = pg.from_("rooms_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
+            if exists_res.data and len(exists_res.data) > 0:
                 raise HTTPException(status_code=409, detail="This is a solo room and is already occupied.")
 
-        supabase.table("rooms_members").upsert({
+        pg.from_("rooms_members").upsert({
             "room_id": req.room_id,
             "user_id": current_user.id,
             "role": "member",
@@ -232,39 +272,23 @@ def list_my_rooms(
     joined_at があれば参加順で並べ替え。
     """
     try:
-        supabase.postgrest.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
         mem = (
-            supabase.table("rooms_members")
-            .select("room_id, joined_at")
-            .eq("user_id", current_user.id)
-            .order("joined_at", desc=True)
+            pg.from_("rooms")
+            .select("id,name, rooms_members!inner(user_id, joined_at)")
+            .eq("rooms_members.user_id", current_user.id)
+            .order("rooms_members.joined_at", desc=True)
             .execute()
         )
         rows = mem.data or []
-        room_ids: list[int] = []
-        seen = set()
+
+        # rows は rooms と join 済みなので、そのまま返せるが順序安定化のため一応整形
+        results: List[RoomBrief] = []
         for r in rows:
-            rid = r["room_id"]
-            if rid not in seen:
-                seen.add(rid)
-                room_ids.append(rid)
-
-        if not room_ids:
-            return []
-
-        rms = (
-            supabase.table("rooms")
-            .select("id,name")
-            .in_("id", room_ids)
-            .execute()
-        )
-        items = rms.data or []
-
-        order = {rid: i for i, rid in enumerate(room_ids)}
-        items.sort(key=lambda x: order.get(x["id"], 10**9))
-
-        return [{"id": it["id"], "name": it.get("name", "") or ""} for it in items]
+            results.append(RoomBrief(id=r["id"], name=r.get("name", "") or ""))
+        return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
@@ -276,14 +300,15 @@ def get_room_details(
     access_token: str = Depends(get_access_token),
 ):
     try:
-        supabase.postgrest.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
-        response = supabase.table("rooms").select("*").eq("id", room_id).limit(1).execute()
+        response = pg.from_("rooms").select("*").eq("id", room_id).limit(1).execute()
         room = (response.data or [None])[0]
         if not room:
             raise HTTPException(status_code=404, detail="Room not found.")
 
-        is_member_res = supabase.table("rooms_members").select("user_id").eq("room_id", room_id).eq("user_id", current_user.id).limit(1).execute()
+        is_member_res = pg.from_("rooms_members").select("user_id").eq("room_id", room_id).eq("user_id", current_user.id).limit(1).execute()
         if not (is_member_res.data and len(is_member_res.data) > 0):
             raise HTTPException(status_code=403, detail="Forbidden: You are not a member of this room.")
 
@@ -301,32 +326,32 @@ def get_room_members(
     access_token: str = Depends(get_access_token),
 ):
     try:
-        supabase.postgrest.auth(access_token)
+        pg = supabase.postgrest
+        pg.auth(access_token)
 
         response = (
-            supabase.table("rooms_members")
-            .select("user_id, joined_at, role, users!inner(display_name, avatar_url)")
-            .eq("room_id", room_id)
-            .order("joined_at", desc=False)
+            pg.from_("rooms")
+            .select("rooms_members!inner(user_id, joined_at, role, users(display_name,avatar_url))")
+            .eq("id", room_id)
             .execute()
         )
 
         members_list: List[RoomMemberDisplayInfo] = []
-        for row in response.data or []:
-            user_info = row.get("users")
-            if isinstance(user_info, list):
-                user_info = user_info[0] if user_info else None
-
-            if user_info:
-                members_list.append(
-                    RoomMemberDisplayInfo(
-                        user_id=row["user_id"],
-                        display_name=user_info.get("display_name", ""),
-                        avatar_url=user_info.get("avatar_url"),
-                        role=row["role"],
-                        joined_at=row["joined_at"],
+        # レコード構造は { rooms_members: [ { user_id, joined_at, role, users: {...} } , ...] }
+        rows = response.data or []
+        if rows:
+            for row in rows:
+                for m in row.get("rooms_members", []) or []:
+                    user_info = m.get("users") or {}
+                    members_list.append(
+                        RoomMemberDisplayInfo(
+                            user_id=m["user_id"],
+                            display_name=user_info.get("display_name", ""),
+                            avatar_url=user_info.get("avatar_url"),
+                            role=m["role"],
+                            joined_at=m["joined_at"],
+                        )
                     )
-                )
         return members_list
 
     except Exception as e:
