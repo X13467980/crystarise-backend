@@ -114,18 +114,34 @@ def create_crystal(
     try:
         res = (
             db.table("crystals")
-            .insert({
-                "room_id": payload.room_id,
-                "title": payload.title,
-                "target_value": str(payload.target_value),  # numericは文字列で渡す
-                "unit": payload.unit,
-            })
-            .select("*")
+            .insert(
+                {
+                    "room_id": payload.room_id,
+                    "title": payload.title,
+                    "target_value": str(payload.target_value),  # numericは文字列で渡す
+                    "unit": payload.unit,
+                },
+                returning="representation",  # ★ 挿入行を返す（環境により返らない場合あり）
+            )
             .execute()
         )
-        if not res.data:
+        row = (res.data or [None])[0]
+
+        # フォールバック：返らない環境向けに room_id で取り直し
+        if not row:
+            ref = (
+                db.table("crystals")
+                .select("*")
+                .eq("room_id", payload.room_id)
+                .order("crystal_id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            row = (ref.data or [None])[0]
+
+        if not row:
             raise HTTPException(status_code=400, detail="insert crystal failed")
-        return res.data[0]
+        return row
     except HTTPException:
         raise
     except Exception as e:
@@ -166,31 +182,49 @@ def add_record(
         # 存在/権限チェック
         crystal = _fetch_crystal(crystal_id, creds.credentials)
 
-        res = (
+        ins = (
             db.table("crystal_records")
-            .insert({
-                "crystal_id": crystal_id,
-                "user_id": user.id,
-                "value": str(payload.value),
-                "note": payload.note or None,
-            })
-            .select("*")
+            .insert(
+                {
+                    "crystal_id": crystal_id,
+                    "user_id": user.id,
+                    "value": str(payload.value),
+                    "note": payload.note or None,
+                },
+                returning="representation",  # ★ ここで返す
+            )
             .execute()
         )
-        if not res.data:
+        row = (ins.data or [None])[0]
+
+        # フォールバック：直近の自分の記録で代替
+        if not row:
+            ref = (
+                db.table("crystal_records")
+                .select("*")
+                .eq("crystal_id", crystal_id)
+                .eq("user_id", user.id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            row = (ref.data or [None])[0]
+
+        if not row:
             raise HTTPException(status_code=400, detail="insert record failed")
 
-        # 単回の記録値に対する%を返す仕様（フロント要件踏襲）
-        row = res.data[0]
+        # 単回の記録値に対する%を返す仕様（既存フロント互換）
         value = Decimal(str(row["value"]))
         target = Decimal(str(crystal["target_value"]))
         percent = int((value / target * 100)) if target > 0 else 0
+        # 0〜100にクリップ（必要なら）
+        percent = max(0, min(100, percent))
         return percent
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to add record: {e}")
-
+    
 @router.post("/by-room/{room_id}/records", summary="進捗を追加（room_id 指定）")
 def add_record_by_room(
     room_id: int,
@@ -207,35 +241,52 @@ def add_record_by_room(
     crystal_id = crystal["crystal_id"]
 
     try:
-        # 2) 記録を追加（user_id は JWT から）
-        res = (
+        # 2) 記録を追加（user_id は JWT から）★ .select() を使わない
+        ins = (
             db.table("crystal_records")
-            .insert({
-                "crystal_id": crystal_id,
-                "user_id": user.id,
-                "value": str(payload.value),
-                "note": payload.note or None,
-            })
-            .select("*")
+            .insert(
+                {
+                    "crystal_id": crystal_id,
+                    "user_id": user.id,
+                    "value": str(payload.value),
+                    "note": payload.note or None,
+                },
+                returning="representation",  # ★ 挿入行を返却
+            )
             .execute()
         )
-        if not res.data:
+        record = (ins.data or [None])[0]
+
+        # フォールバック：返らない環境向けに直近1件を再取得
+        if not record:
+            ref = (
+                db.table("crystal_records")
+                .select("*")
+                .eq("crystal_id", crystal_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            record = (ref.data or [None])[0]
+
+        if not record:
             raise HTTPException(status_code=400, detail="insert record failed")
 
-        # 3) 直後のサマリーも返す（UI即時更新用）
+        # 3) 合計値計算 → progress_rate
         total = _sum_records(crystal_id, creds.credentials)
         target = Decimal(str(crystal["target_value"]))
         rate = float(total / target) if target > 0 else 0.0
+        rate = min(rate, 1.0)
 
         return {
-            "record": res.data[0],
+            "record": record,
             "summary": {
                 "crystal_id": crystal_id,
                 "title": crystal["title"],
                 "target_value": target,
                 "unit": crystal["unit"],
                 "total_value": total,
-                "progress_rate": min(rate, 1.0),
+                "progress_rate": rate,
             },
         }
     except HTTPException:
