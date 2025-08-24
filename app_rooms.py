@@ -1,13 +1,13 @@
 # app_rooms.py
 from typing import Optional, List
-from decimal import Decimal # condecimalの代わりにDecimalをインポート
-from datetime import datetime # joined_at の型定義に使用
+from decimal import Decimal
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from supabase_client import supabase
-import random, string # generate_password関数に使用
+from supabase_client import supabase  # 既存クライアントを利用（postgrest.auth でRLS通す）
+import random, string
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -15,36 +15,33 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 class CreateSoloPayload(BaseModel):
     name: str
     title: str
-    target_value: Decimal # condecimalの代わりにDecimalを使用
+    target_value: Decimal
     unit: str
-    password: Optional[str] = None  # Python 3.9 互換
+    password: Optional[str] = None
 
 class JoinRoomRequest(BaseModel):
     room_id: int
     password: str
 
-# 部屋メンバーの表示用データモデル
 class RoomMemberDisplayInfo(BaseModel):
     user_id: str
     display_name: str
-    avatar_url: Optional[str] = None # アバターURLはオプション
+    avatar_url: Optional[str] = None
     role: str
     joined_at: datetime
+
+# 自分の所属ルーム一覧用
+class RoomBrief(BaseModel):
+    id: int
+    name: str
 
 # ====== Auth helpers ======
 bearer_scheme = HTTPBearer(auto_error=True)
 
 def get_access_token(creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
-    """
-    HTTPBearerからアクセストークンを抽出し、文字列として返します。
-    """
     return creds.credentials
 
 def get_current_user(access_token: str = Depends(get_access_token)):
-    """
-    提供されたアクセストークンを使用して現在のユーザー情報を取得し、検証します。
-    無効な場合は401 HTTPExceptionを発生させます。
-    """
     try:
         resp = supabase.auth.get_user(access_token)
         user = getattr(resp, "user", None)
@@ -56,25 +53,21 @@ def get_current_user(access_token: str = Depends(get_access_token)):
 
 # ====== Utils ======
 def generate_password(length: int = 6) -> str:
-    """
-    指定された長さのランダムな英数字パスワードを生成します。
-    """
     chars = string.ascii_uppercase + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
 
-# ====== 1) ソロ作成: room + crystal + 自分をメンバー（トランザクション/RPC） ======
+# ====== 1) ソロ作成: room + crystal + 自分をメンバー（RPC） ======
 @router.post("/solo")
-def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get_access_token)):
-    """
-    ソロモードの部屋とクリスタルを作成し、作成者をメンバーとして登録します。
-    （RPC機能を使用しているため、Supabase側の設定が必要です）
-    """
+def create_solo_room(
+    payload: CreateSoloPayload,
+    access_token: str = Depends(get_access_token),
+):
     try:
         rpc_client = supabase.postgrest
         rpc_client.auth(access_token)
 
         resp = rpc_client.rpc(
-            "create_solo_room_with_crystal", # SupabaseのRPC関数名
+            "create_solo_room_with_crystal",
             {
                 "p_title": payload.title,
                 "p_target": str(payload.target_value),
@@ -95,15 +88,13 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
             raise HTTPException(status_code=500, detail=f"Unexpected RPC payload keys: {list(row.keys())}")
 
         try:
-            # RPCがnameを保存していない場合に備えて更新
             rpc_client.from_("rooms").update({"name": payload.name}).eq("id", room_id).execute()
         except Exception:
-            # ここで失敗しても致命的ではないため、ログに記録するのみ
             pass
 
         return {
             "room_id": room_id,
-            "crystal_id": _id,
+            "crystal_id": crystal_id,
             "name": payload.name,
             "title": payload.title,
             "target_value": str(payload.target_value),
@@ -114,19 +105,21 @@ def create_solo_room(payload: CreateSoloPayload, access_token: str = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create solo room: {e}")
 
-# ====== 2) 通常の部屋作成（rooms に1行+自分をhostでメンバー登録） ======
+# ====== 2) 通常の部屋作成（rooms + 自分をhostでメンバー登録） ======
 @router.post("")
-def create_room(current_user = Depends(get_current_user)):
-    """
-    ソロモードの部屋を作成し、作成者をホストとしてメンバーに登録します。
-    """
+def create_room(
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     try:
+        supabase.postgrest.auth(access_token)
+
         password = generate_password()
         res_room = supabase.table("rooms").insert({
             "host_id": current_user.id,
             "password": password,
-            "mode": "solo",  # ソロモードの指定
-        }).execute()
+            "mode": "solo",
+        }).select("*").execute()
 
         created = (res_room.data or [None])[0]
         if not created:
@@ -134,8 +127,8 @@ def create_room(current_user = Depends(get_current_user)):
 
         room_id = created["id"]
 
-        # 作成者を host でメンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        # rooms_members に upsert
+        supabase.table("rooms_members").upsert({
             "room_id": room_id,
             "user_id": current_user.id,
             "role": "host",
@@ -151,19 +144,21 @@ def create_room(current_user = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database operation failed: {e}")
 
-# --- 新しく追加するグループルーム作成API ---
+# --- 3) グループルーム作成 ---
 @router.post("/group")
-def create_group_room(current_user = Depends(get_current_user)):
-    """
-    グループモードの部屋を作成し、作成者をホストとしてメンバーに登録します。
-    """
+def create_group_room(
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     try:
+        supabase.postgrest.auth(access_token)
+
         password = generate_password()
         res_room = supabase.table("rooms").insert({
             "host_id": current_user.id,
             "password": password,
-            "mode": "group",  # グループモードの指定
-        }).execute()
+            "mode": "group",
+        }).select("*").execute()
 
         created = (res_room.data or [None])[0]
         if not created:
@@ -171,8 +166,7 @@ def create_group_room(current_user = Depends(get_current_user)):
 
         room_id = created["id"]
 
-        # 作成者を host でメンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        supabase.table("rooms_members").upsert({
             "room_id": room_id,
             "user_id": current_user.id,
             "role": "host",
@@ -188,33 +182,35 @@ def create_group_room(current_user = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create group room: {e}")
 
-# ====== 3) 参加（パスワード検証 + メンバー登録） ======
+# ====== 4) 参加（パスワード検証 + メンバー登録） ======
 @router.post("/join")
-def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
-    """
-    ルームIDとパスワードを検証し、ユーザーを部屋のメンバーとして登録します。
-    """
+def join_room(
+    req: JoinRoomRequest,
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     try:
-        # 部屋の存在 & パスワード確認
-        room_res = supabase.table("rooms").select("id, password, mode").eq("id", req.room_id).single().execute() # modeも取得
-        room = room_res.data
+        supabase.postgrest.auth(access_token)
+
+        room_res = supabase.table("rooms").select("id, password, mode").eq("id", req.room_id).limit(1).execute()
+        room_rows = room_res.data or []
+        room = room_rows[0] if room_rows else None
         if not room:
             raise HTTPException(status_code=404, detail="Room not found.")
 
         if room["password"] != req.password:
             raise HTTPException(status_code=401, detail="Invalid password.")
 
-        # ひとり専用ルームのチェック（ソロモードの場合のみ）
+        # ソロルームは1人のみ
         if room["mode"] == "solo":
-            existing_members_count_res = supabase.table("room_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
-            if existing_members_count_res.data and len(existing_members_count_res.data) > 0:
+            existing = supabase.table("rooms_members").select("user_id").eq("room_id", req.room_id).limit(1).execute()
+            if existing.data and len(existing.data) > 0:
                 raise HTTPException(status_code=409, detail="This is a solo room and is already occupied.")
 
-        # メンバー登録（重複時は無視 - upsertを使用）
-        supabase.table("room_members").upsert({
+        supabase.table("rooms_members").upsert({
             "room_id": req.room_id,
             "user_id": current_user.id,
-            "role": "member", # 参加者は"member"ロール
+            "role": "member",
         }, on_conflict="room_id,user_id").execute()
 
         return {"message": "Successfully joined the room."}
@@ -224,57 +220,100 @@ def join_room(req: JoinRoomRequest, current_user = Depends(get_current_user)):
         if "rows not found" in str(e):
             raise HTTPException(status_code=404, detail="Room not found.")
         raise HTTPException(status_code=500, detail=str(e))
-        
-# ====== 4) 特定の部屋情報を取得 ======
-@router.get("/{room_id}", response_model=dict)
-def get_room_details(room_id: int, current_user = Depends(get_current_user)):
+
+# ====== 5) 自分の所属ルーム一覧（id, name） ← ★静的パスを先に置く
+@router.get("/mine", response_model=List[RoomBrief], summary="自分の所属ルーム一覧（id,name）")
+def list_my_rooms(
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     """
-    特定の部屋の情報を取得します。
-    ユーザーがその部屋のメンバーである必要があります。
+    rooms_members から自分の room_id を取り出し、rooms の id/name を返す。
+    joined_at があれば参加順で並べ替え。
     """
     try:
-        response = supabase.table("rooms").select("*").eq("id", room_id).single().execute()
+        supabase.postgrest.auth(access_token)
 
-        if not response.data:
+        mem = (
+            supabase.table("rooms_members")
+            .select("room_id, joined_at")
+            .eq("user_id", current_user.id)
+            .order("joined_at", desc=True)
+            .execute()
+        )
+        rows = mem.data or []
+        room_ids: list[int] = []
+        seen = set()
+        for r in rows:
+            rid = r["room_id"]
+            if rid not in seen:
+                seen.add(rid)
+                room_ids.append(rid)
+
+        if not room_ids:
+            return []
+
+        rms = (
+            supabase.table("rooms")
+            .select("id,name")
+            .in_("id", room_ids)
+            .execute()
+        )
+        items = rms.data or []
+
+        order = {rid: i for i, rid in enumerate(room_ids)}
+        items.sort(key=lambda x: order.get(x["id"], 10**9))
+
+        return [{"id": it["id"], "name": it.get("name", "") or ""} for it in items]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+# ====== 6) 特定の部屋情報を取得（動的パスは最後に）
+@router.get("/{room_id}", response_model=dict)
+def get_room_details(
+    room_id: int,
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
+    try:
+        supabase.postgrest.auth(access_token)
+
+        response = supabase.table("rooms").select("*").eq("id", room_id).limit(1).execute()
+        room = (response.data or [None])[0]
+        if not room:
             raise HTTPException(status_code=404, detail="Room not found.")
 
-        # ユーザーがその部屋のメンバーか確認
-        is_member_res = supabase.table("room_members").select("user_id").eq("room_id", room_id).eq("user_id", current_user.id).execute()
-        if not is_member_res.data:
+        is_member_res = supabase.table("rooms_members").select("user_id").eq("room_id", room_id).eq("user_id", current_user.id).limit(1).execute()
+        if not (is_member_res.data and len(is_member_res.data) > 0):
             raise HTTPException(status_code=403, detail="Forbidden: You are not a member of this room.")
-        
-        room_details = response.data
-        return room_details
-        
+
+        return room
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ====== 5) 部屋メンバーのリストを取得 ======
+# ====== 7) 部屋メンバーのリストを取得
 @router.get("/{room_id}/members", response_model=List[RoomMemberDisplayInfo])
-def get_room_members(room_id: int, current_user = Depends(get_current_user)):
-    """
-    特定の部屋のメンバーリストとその表示名、アバターURL、ロール、参加日時を取得します。
-    """
+def get_room_members(
+    room_id: int,
+    current_user = Depends(get_current_user),
+    access_token: str = Depends(get_access_token),
+):
     try:
-        # room_membersとusersを結合してメンバー情報を取得
-        # users!inner(...) は、room_membersのuser_idとusersテーブルを内部結合し、
-        # 指定したカラム (display_name, avatar_url) を取得します。
+        supabase.postgrest.auth(access_token)
+
         response = (
-            supabase.table("room_members")
-            .select(
-                "user_id, joined_at, role, users!inner(display_name, avatar_url)"
-            )
+            supabase.table("rooms_members")
+            .select("user_id, joined_at, role, users!inner(display_name, avatar_url)")
             .eq("room_id", room_id)
-            .order("joined_at", desc=False) # 参加日時でソート
+            .order("joined_at", desc=False)
             .execute()
         )
 
         members_list: List[RoomMemberDisplayInfo] = []
         for row in response.data or []:
             user_info = row.get("users")
-            # PostgRESTは1対1なら dict、1対多なら list になることがあるので両対応
             if isinstance(user_info, list):
                 user_info = user_info[0] if user_info else None
 
@@ -282,15 +321,13 @@ def get_room_members(room_id: int, current_user = Depends(get_current_user)):
                 members_list.append(
                     RoomMemberDisplayInfo(
                         user_id=row["user_id"],
-                        display_name=user_info.get("display_name", ""), # display_nameがなくてもエラーにならないようにデフォルト値設定
-                        avatar_url=user_info.get("avatar_url"), # avatar_urlがなくてもエラーにならないようにデフォルト値設定
+                        display_name=user_info.get("display_name", ""),
+                        avatar_url=user_info.get("avatar_url"),
                         role=row["role"],
                         joined_at=row["joined_at"],
                     )
                 )
-        
         return members_list
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch room members: {e}")
-
