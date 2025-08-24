@@ -2,13 +2,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
+
 from supabase_client import supabase
 
 # Sub-routers
 from app_profile import router as me_router
 from app_rooms import router as rooms_router
-from app_crystal import router as crystals_router  # ← 追加
-from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
+from app_crystal import router as crystals_router  # 結晶系エンドポイント
 
 app = FastAPI(
     title="CrystaRise API",
@@ -37,22 +38,18 @@ def health():
 # ===== Include sub-routers =====
 # /me/* エンドポイント
 app.include_router(me_router)
-# /rooms/* エンドポイント（solo作成・参加などを集約）
+# /rooms/* エンドポイント（solo作成・参加など）
 app.include_router(rooms_router)
 # /crystals/* エンドポイント（結晶の作成・記録・集計）
-app.include_router(crystals_router)  # ← 追加
+app.include_router(crystals_router)
 
-# ===== Auth DTO & Room Join DTO =====
+# ===== Auth DTO =====
 class UserSignUpRequest(BaseModel):
     email: str
     password: str
 
 class UserSignInRequest(BaseModel):
     email: str
-    password: str
-
-class JoinRoomRequest(BaseModel):
-    room_id: str
     password: str
 
 # ===== Auth endpoints =====
